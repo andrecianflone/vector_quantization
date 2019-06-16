@@ -15,7 +15,7 @@ def show(img, path):
     fig.axes.get_yaxis().set_visible(False)
 
     plt.savefig(path)
-    # fig.savefig(path)
+    plt.clf()
 
 def plot_results(recon_error, ppl, path):
     fold = os.path.dirname(path)
@@ -39,4 +39,5 @@ def plot_results(recon_error, ppl, path):
 
     # plt.savefig(path)
     fig.savefig(path)
+    plt.clf()
 

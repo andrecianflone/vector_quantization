@@ -48,7 +48,7 @@ def train_epoch(args, pbar, train_loader, model, optimizer,
                                                                 increment=100)
         args.global_it += 1
 
-def evaluate(model, valid_loader):
+def generate_samples(model, valid_loader):
     model.eval()
     (valid_originals, _) = next(iter(valid_loader))
     valid_originals = valid_originals.to(device)
@@ -76,7 +76,7 @@ def main(args):
     optimizer = optim.Adam(model.parameters(),lr=args.learning_rate,
                                                                 amsgrad=False)
 
-    print(f"Start training for {args.num_epochs}")
+    print(f"Start training for {args.num_epochs} epochs")
     num_batches = math.ceil(len(train_loader.dataset)/train_loader.batch_size)
     pbar = Progress(num_batches, bar_length=20, custom_increment=True)
     best_loss = -1.
@@ -90,13 +90,14 @@ def main(args):
                 optimizer, train_res_recon_error, train_res_perplexity)
         # loss, _ = test(valid_loader, model, args)
         # pbar.print_eval(loss)
+        evaluate(model, valid_loader)
         pbar.print_end_epoch()
 
     print("Plotting training results")
     utils.plot_results(train_res_recon_error, train_res_perplexity, "results/train.png")
 
     print("Evaluate and plot validation set")
-    evaluate(model, valid_loader)
+    generate_samples(model, valid_loader)
 
 if __name__ == '__main__':
 
