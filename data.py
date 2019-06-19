@@ -19,13 +19,16 @@ def get_data(folder, batch_size):
     train_loader = DataLoader(training_data,
                                  batch_size=batch_size,
                                  shuffle=True,
-                                 pin_memory=True)
+                                 pin_memory=True,
+                                 drop_last=True)
 
     valid_loader = DataLoader(validation_data,
                                    batch_size=batch_size,
                                    shuffle=True,
-                                   pin_memory=True)
+                                   pin_memory=True,
+                                   drop_last=True)
 
     data_var = np.var(training_data.train_data / 255.0)
+    input_size = (3, 32, 32)
 
-    return train_loader, valid_loader, data_var
+    return train_loader, valid_loader, data_var, input_size
