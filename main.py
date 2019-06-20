@@ -9,7 +9,6 @@ References:
 [2] van den Oord, Aaron, and Oriol Vinyals. "Neural discrete representation
     learning." Advances in Neural Information Processing Systems. 2017.
     https://arxiv.org/abs/1711.00937
-
 """
 import argparse
 import os
@@ -28,96 +27,97 @@ from progress import Progress
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def evaluate(args, pbar, valid_loader, model):
+def vq_vae_loss(args, x_prime, x, vq_loss, model):
+    # Use Discretized Logistic as an alternative to MSE, see [1]
+    log_pxz = utils.discretized_logistic(x_prime, model.dec_log_stdv,
+                                                    sample=x).mean()
+
+    # recon_error = torch.mean((data_recon - data)**2)/args.data_variance
+    # loss = recon_error + vq_loss
+
+    loss = -1 * (log_pxz / args.N) + args.commitment_cost * vq_loss
+    elbo = - (args.KL - log_pxz) / args.N
+    bpd  = elbo / np.log(2.)
+
+    return loss, log_pxz, bpd
+
+def evaluate(args, loss_func, pbar, valid_loader, model):
     """
     Evaluate validation set
     """
     model.eval()
-    valid_loss, valid_recon_error , valid_perplexity = [], [], []
+    valid_bpd, valid_recon_error , valid_perplexity = [], [], []
     # Loop data in validation set
-    for data, _ in valid_loader:
+    for x, _ in valid_loader:
 
-        data = data.to(args.device)
+        x = x.to(args.device)
 
-        # Loss
-        vq_loss, data_recon, perplexity = model(data)
-        recon_error = torch.mean((data_recon - data)**2)/args.data_variance
-        loss = recon_error + vq_loss
+        x_prime, vq_loss, perplexity = model(x)
 
-        valid_loss.append(loss.item())
-        valid_recon_error.append(recon_error.item())
+        loss, log_pxz, bpd = loss_func(args, x_prime, x, vq_loss, model)
+
+        valid_bpd.append((-1)*bpd.item())
+        valid_recon_error.append((-1)*log_pxz.item())
         valid_perplexity.append(perplexity.item())
 
-    av_loss = np.mean(valid_loss)
+    av_bpd = np.mean(valid_bpd)
     av_rec_err = np.mean(valid_recon_error)
     av_ppl = np.mean(valid_perplexity)
-    pbar.print_eval(av_loss)
+    pbar.print_eval(av_bpd)
     # pbar.print_train(av_rec_err=float(av_rec_err), av_ppl=float(av_ppl),
                                                         # increment=100)
-    return av_loss
+    return av_bpd
 
-def train_epoch(args, pbar, train_loader, model, optimizer,
-        train_bpd, train_res_recon_error , train_res_perplexity, KL, N):
+def train_epoch(args, loss_func, pbar, train_loader, model, optimizer,
+        train_bpd, train_recon_error , train_perplexity):
     """
     Train for one epoch
     """
     model.train()
     # Loop data in epoch
-    for data, _ in train_loader:
+    for x, _ in train_loader:
 
         # This break used for debugging
         if args.max_iterations is not None:
             if args.global_it > args.max_iterations:
                 break
 
-        data = data.to(args.device)
+        x = x.to(args.device)
 
         # Get reconstruction and vector quantization loss
-        # `x`: reconstruction of `input`
+        # `x_prime`: reconstruction of `input`
         # `vq_loss`: MSE(encoded embeddings, nearest emb in codebooks)
-        # x_prime, vq_loss, perplexity = model(data)
-        x_prime, vq_loss = model(data)
+        x_prime, vq_loss, perplexity = model(x)
 
-        # Use Discretized Logistic as an alternative to MSE, see [1]
-        log_pxz = utils.discretized_logistic(x, model.dec_log_stdv,
-                                                        sample=input).mean()
-
-        # recon_error = torch.mean((data_recon - data)**2)/args.data_variance
-        # loss = recon_error + vq_loss
-
-        loss = -1 * (log_pxz / N) + args.commit_coef * latent_loss
-
-        elbo = - (KL - log_pxz) / N
-        bpd  = elbo / np.log(2.)
+        loss, log_pxz, bpd = loss_func(args, x_prime, x, vq_loss, model)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        train_bpd.append(bpd.item())
-        train_res_recon_error.append(recon_error.item())
-        train_res_perplexity.append(perplexity.item())
+        train_bpd.append((-1)*bpd.item())
+        train_recon_error.append((-1)*log_pxz.item())
+        train_perplexity.append(perplexity.item())
 
         # Print Average every 100 steps
         if (args.global_it+1) % 100 == 0:
-            av_rec_err = np.mean(train_res_recon_error[-100:])
-            av_ppl = np.mean(train_res_perplexity[-100:])
-            pbar.print_train(av_rec_err=float(av_rec_err), av_ppl=float(av_ppl),
+            av_bpd = np.mean(train_bpd[-100:])
+            av_rec_err = np.mean(train_recon_error[-100:])
+            av_ppl = np.mean(train_perplexity[-100:])
+            pbar.print_train(bdp=float(av_bpd), av_rec_err=float(av_rec_err),
                                                                 increment=100)
         args.global_it += 1
 
 def generate_samples(model, valid_loader):
     model.load_state_dict(torch.load(args.save_path))
     model.eval()
-    (valid_originals, _) = next(iter(valid_loader))
-    valid_originals = valid_originals.to(device)
+    (x, _) = next(iter(valid_loader))
+    x = x.to(device)
 
-    vq_output_eval = model._pre_vq_conv(model._encoder(valid_originals))
-    _, valid_quantize, _, _ = model._vq_vae(vq_output_eval)
-    valid_reconstructions = model._decoder(valid_quantize)
+    x_prime, vq_loss, perplexity = model(x)
 
-    utils.show(valid_reconstructions, "results/valid_recon.png")
-    utils.show(valid_originals, "results/valid_originals.png")
+    utils.show(x_prime, "results/valid_recon.png")
+    utils.show(x, "results/valid_originals.png")
 
 def main(args):
     print("Loading data")
@@ -125,7 +125,7 @@ def main(args):
                                 data.get_data(args.data_folder,args.batch_size)
 
     args.input_size = input_size
-    args.downsample = args.input_size[-1] // args.args.enc_height
+    args.downsample = args.input_size[-1] // args.enc_height
     args.data_variance = data_var
     print(f"Training set size {len(train_loader.dataset)}")
     print(f"Validation set size {len(valid_loader.dataset)}")
@@ -140,23 +140,22 @@ def main(args):
     pbar = Progress(num_batches, bar_length=20, custom_increment=True)
 
     # Needed for bpd
-    # TODO: HERE
-    KL = args.enc_height * args.enc_height * args.num_codebooks * \
+    args.KL = args.enc_height * args.enc_height * args.num_codebooks * \
                                                     np.log(args.num_embeddings)
-    N  = np.prod(args.input_size)
+    args.N  = np.prod(args.input_size)
 
     best_valid_loss = float('inf')
     train_bpd = []
-    train_res_recon_error = []
-    train_res_perplexity = []
+    train_recon_error = []
+    train_perplexity = []
     args.global_it = 0
     for epoch in range(args.num_epochs):
         pbar.epoch_start()
-        train_epoch(args, pbar, train_loader, model, optimizer, train_bpd,
-                            train_res_recon_error, train_res_perplexity, KL, N)
+        train_epoch(args, vq_vae_loss, pbar, train_loader, model, optimizer,
+                                train_bpd, train_recon_error, train_perplexity)
         # loss, _ = test(valid_loader, model, args)
         # pbar.print_eval(loss)
-        valid_loss = evaluate(args, pbar, valid_loader, model)
+        valid_loss = evaluate(args, vq_vae_loss, pbar, valid_loader, model)
         if valid_loss < best_valid_loss:
             best_valid_loss = valid_loss
             best_valid_epoch = epoch
@@ -164,7 +163,7 @@ def main(args):
         pbar.print_end_epoch()
 
     print("Plotting training results")
-    utils.plot_results(train_res_recon_error, train_res_perplexity,
+    utils.plot_results(train_recon_error, train_perplexity,
                                                         "results/train.png")
 
     print("Evaluate and plot validation set")

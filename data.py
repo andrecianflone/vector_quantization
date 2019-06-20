@@ -28,7 +28,7 @@ def get_data(folder, batch_size):
                                    pin_memory=True,
                                    drop_last=True)
 
-    data_var = np.var(training_data.train_data / 255.0)
+    data_var = np.var(training_data.data / 255.0)
     input_size = (3, 32, 32)
 
     return train_loader, valid_loader, data_var, input_size

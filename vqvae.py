@@ -1,10 +1,15 @@
+"""
+Vector Quantization class
+
+Based on VQVAE code from:
+https://github.com/rosinality/vq-vae-2-pytorch
+
+In turn based on
+https://github.com/deepmind/sonnet and ported it to PyTorch
+"""
 import torch
 from torch import nn
 from torch.nn import functional as F
-
-
-# Borrowed from https://github.com/deepmind/sonnet and ported it to PyTorch
-# Taken    from https://github.com/rosinality/vq-vae-2-pytorch
 
 class Quantize(nn.Module):
     def __init__(self, dim, num_embeddings, decay=0.99, eps=1e-5):
@@ -20,8 +25,8 @@ class Quantize(nn.Module):
         self.register_buffer('cluster_size', torch.zeros(num_embeddings))
         self.register_buffer('embed_avg', embed.clone())
 
-    def forward(self, input):
-        flatten = input.reshape(-1, self.dim)
+    def forward(self, x):
+        flatten = x.reshape(-1, self.dim)
         dist = (
             flatten.pow(2).sum(1, keepdim=True)
             - 2 * flatten @ self.embed
@@ -29,7 +34,7 @@ class Quantize(nn.Module):
         )
         _, embed_ind = (-dist).max(1)
         embed_onehot = F.one_hot(embed_ind, self.num_embeddings).type(flatten.dtype)
-        embed_ind = embed_ind.view(*input.shape[:-1])
+        embed_ind = embed_ind.view(*x.shape[:-1])
         quantize = self.embed_code(embed_ind)
 
         if self.training:
@@ -45,9 +50,9 @@ class Quantize(nn.Module):
             embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
             self.embed.data.copy_(embed_normalized)
 
-        diff = (quantize.detach() - input).pow(2).mean()
-        # The +- `input` is the "straight-through" gradient trick!
-        quantize = input + (quantize - input).detach()
+        diff = (quantize.detach() - x).pow(2).mean()
+        # The +- `x` is the "straight-through" gradient trick!
+        quantize = x + (quantize - x).detach()
 
         return quantize, diff, embed_ind
 
@@ -66,9 +71,9 @@ class ResBlock(nn.Module):
             nn.Conv2d(channel, in_channel, 1),
         )
 
-    def forward(self, input):
-        out = self.conv(input)
-        out += input
+    def forward(self, x):
+        out = self.conv(x)
+        out += x
 
         return out
 
@@ -117,8 +122,8 @@ class Encoder(nn.Module):
 
         self.blocks = nn.Sequential(*blocks)
 
-    def forward(self, input):
-        return self.blocks(input)
+    def forward(self, x):
+        return self.blocks(x)
 
 
 class Decoder(nn.Module):
@@ -156,8 +161,8 @@ class Decoder(nn.Module):
 
         self.blocks = nn.Sequential(*blocks)
 
-    def forward(self, input):
-        return self.blocks(input)
+    def forward(self, x):
+        return self.blocks(x)
 
 
 class VQVAE(nn.Module):
@@ -191,49 +196,54 @@ class VQVAE(nn.Module):
         self.register_parameter('dec_log_stdv', torch.nn.Parameter(\
                                                         torch.Tensor([0.])))
 
-    def forward(self, input):
-        # `input` is shape BCHW
+    def forward(self, x):
+        """
+        Args:
+            x (Tensor): shape BCHW
+        """
         # `diff`: MSE(embeddings in z_e_s, closest in codebooks)
-        # `z_q`, shape B*EMB_DIM*CHW, is neirest neigh embeddings to input
-        z_q, diff, _ = self.encode(input)
+        # `z_q`, shape B*EMB_DIM*CHW, is neirest neigh embeddings to x
+        z_q, diff, emb_idx, ppl = self.encode(x)
 
-        # `dec`: decode `z_q` to `input` size, it is the image reconstruction
+        # `dec`: decode `z_q` to `x` size, it is the image reconstruction
         dec = self.decode(z_q)
 
-        return dec, diff
+        return dec, diff, ppl
 
-    def encode(self, input):
-        # Encode input to continuous space
-        pre_z_e = self.enc(input)
+    def encode(self, x):
+        # Encode x to continuous space
+        pre_z_e = self.enc(x)
         # Project that space to the proper size for embedding comparison
-        z_e     = self.quantize_conv(pre_z_e)
+        z_e = self.quantize_conv(pre_z_e)
 
         # Divide into multiple chunks to fit each codebook
-        z_e_s   = z_e.chunk(len(self.quantize), 1)
+        z_e_s = z_e.chunk(len(self.quantize), 1)
 
         z_q_s, argmins = [], []
-        diffs = 0.
+        diffs, ppl = 0., 0.
 
         # `argmin`: the indices corresponding to closest embedding in codebook
         # `z_q`: same size as z_e_s but now holds the vectors from codebook
         # `diff`: MSE(embeddings in z_e_s, closest in codebooks)
         for z_e, quantize in zip(z_e_s, self.quantize):
             z_q, diff, argmin = quantize(z_e.permute(0, 2, 3, 1))
+            avg_probs = torch.mean(z_q, dim=0)
+            perplexity = torch.exp(-torch.sum(\
+                                    avg_probs * torch.log(avg_probs + 1e-10)))
             z_q_s   += [z_q]
             argmins += [argmin]
             diffs   += diff
+            ppl     += perplexity
 
         # Stack the z_q_s and permute, now `z_q` has the same shape as the
         # first z_e
         z_q = torch.cat(z_q_s, dim=-1)
         z_q = z_q.permute(0, 3, 1, 2)
 
-        return z_q, diffs, argmins
+        return z_q, diffs, argmins, ppl
 
     def decode(self, quant):
         return self.dec(quant)
-
-
 
 class VQVAE_2(nn.Module):
     def __init__(
@@ -263,14 +273,14 @@ class VQVAE_2(nn.Module):
         self.dec = Decoder(embed_dim + embed_dim,in_channel,channel,
                 num_residual_layers,num_residual_hiddens, stride=2)
 
-    def forward(self, input):
-        quant_t, quant_b, diff, _, _ = self.encode(input)
+    def forward(self, x):
+        quant_t, quant_b, diff, _, _ = self.encode(x)
         dec = self.decode(quant_t, quant_b)
 
         return dec, diff
 
-    def encode(self, input):
-        enc_b = self.enc_b(input)
+    def encode(self, x):
+        enc_b = self.enc_b(x)
         enc_t = self.enc_t(enc_b)
 
         quant_t = self.quantize_conv_t(enc_t).permute(0, 2, 3, 1)
