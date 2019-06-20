@@ -104,7 +104,11 @@ def train_epoch(args, loss_func, pbar, train_loader, model, optimizer,
             av_bpd = np.mean(train_bpd[-100:])
             av_rec_err = np.mean(train_recon_error[-100:])
             av_ppl = np.mean(train_perplexity[-100:])
-            pbar.print_train(bpd=float(av_bpd), temp=float(model.temp),
+            if args.model == 'vqvae':
+                pbar.print_train(bpd=float(av_bpd), rec_err=float(av_rec_err),
+                                                                increment=100)
+            elif args.model == 'diffvqvae':
+                pbar.print_train(bpd=float(av_bpd), temp=float(model.temp),
                                                                 increment=100)
         args.global_it += 1
 
