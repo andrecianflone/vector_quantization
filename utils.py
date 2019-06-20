@@ -52,3 +52,7 @@ def discretized_logistic(mean, logscale, binsize=1 / 256.0, sample=None):
 def maybe_create_dir(path):
     if not os.path.exists(path):
         os.makedirs(path)
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+

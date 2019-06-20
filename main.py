@@ -120,6 +120,9 @@ def generate_samples(model, valid_loader):
     utils.show(x, "results/valid_originals.png")
 
 def main(args):
+    ###############################
+    # TRAIN PREP
+    ###############################
     print("Loading data")
     train_loader, valid_loader, data_var, input_size = \
                                 data.get_data(args.data_folder,args.batch_size)
@@ -132,6 +135,8 @@ def main(args):
 
     print("Loading model")
     model = VQVAE(args).to(device) # see [2]
+    print(f'The model has {utils.count_parameters(model):,} trainable parameters')
+
     optimizer = optim.Adam(model.parameters(),lr=args.learning_rate,
                                                                 amsgrad=False)
 
@@ -144,6 +149,9 @@ def main(args):
                                                     np.log(args.num_embeddings)
     args.N  = np.prod(args.input_size)
 
+    ###############################
+    # MAIN TRAIN LOOP
+    ###############################
     best_valid_loss = float('inf')
     train_bpd = []
     train_recon_error = []
