@@ -5,7 +5,7 @@ from datetime import datetime
 
 class Progress():
   """ Pretty print progress for neural net training """
-  def __init__(self, batches, best_val=0, test_val=0, epoch=0,
+  def __init__(self, batches, best_val=float('inf'), test_val=0, epoch=0,
         progress_bar=True, bar_length=30, track_best=True,
         custom_increment=False):
     """
