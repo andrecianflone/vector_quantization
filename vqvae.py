@@ -1,3 +1,4 @@
+import utils
 """
 Vector Quantization class
 
@@ -10,6 +11,23 @@ https://github.com/deepmind/sonnet and ported it to PyTorch
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+def sq_l2(x, embedding):
+    """
+    Squared-L2 Distance. Return Tensor of shape [B*H*W, embeddings_dim
+
+    Args:
+        x (T)         : shape [B*H*W, C], where C = embeddings_dim
+        embedding (T) : shape [embedding_dim, num_embeddings]
+    """
+    # Dist: squared-L2(p,q) = ||p||^2 + ||q||^2 - 2pq
+    dist = (
+        x.pow(2).sum(1, keepdim=True)
+        - 2 * x @ embedding
+        + embedding.pow(2).sum(0, keepdim=True)
+    )
+    _, embed_ind = (-dist).max(1)
+    return embed_ind, dist
 
 class Quantize(nn.Module):
     def __init__(self, dim, num_embeddings, decay=0.99, eps=1e-5):
@@ -27,13 +45,15 @@ class Quantize(nn.Module):
 
     def forward(self, x):
         flatten = x.reshape(-1, self.dim)
+        # Dist: squared-L2(p,q) = ||p||^2 + ||q||^2 - 2pq
         dist = (
             flatten.pow(2).sum(1, keepdim=True)
             - 2 * flatten @ self.embed
             + self.embed.pow(2).sum(0, keepdim=True)
         )
         _, embed_ind = (-dist).max(1)
-        embed_onehot = F.one_hot(embed_ind, self.num_embeddings).type(flatten.dtype)
+        embed_onehot = F.one_hot(embed_ind, self.num_embeddings)
+        embed_onehot = embed_onehot.type(flatten.dtype) # cast
         embed_ind = embed_ind.view(*x.shape[:-1])
         quantize = self.embed_code(embed_ind)
 
@@ -58,6 +78,91 @@ class Quantize(nn.Module):
 
     def embed_code(self, embed_id):
         return F.embedding(embed_id, self.embed.transpose(0, 1))
+
+class DiffQuantize(Quantize):
+    def __init__(self, dim, num_embeddings, decay=0.99, eps=1e-5, diff_temp=4,
+                decay_schedule=100, decay_rate=0.90, embed_grad_update=False):
+        """
+        Differentiable NearNeigh Quantization. As temperature decreases,
+        converges to nearest neighbour
+
+        Args:
+            nn_temp: softmax temp w/ nearest neighbour logits
+        """
+        super().__init__(dim, num_embeddings, decay, eps)
+        # self.temp = torch.tensor(diff_temp, requires_grad=False).to(device)
+        # self.min_temp = torch.tensor(0.05, requires_grad=False).to(device)
+        self.temp = diff_temp
+        self.min_temp = 0.01
+        self.batch_count = 0
+        self.decay_schedule = decay_schedule
+        self.decay_rate = decay_rate
+        self.embed_grad_update=embed_grad_update
+
+        # If updating Embed with gradient descent, register Embed as parameter
+        if embed_grad_update:
+            delattr(self, 'embed')
+            embed = torch.randn(dim, num_embeddings)
+            self.register_parameter('embed', torch.nn.Parameter(embed))
+
+    def temp_update(self):
+        self.batch_count += 1
+        if self.batch_count % self.decay_schedule == 0:
+            self.temp=max(self.temp*self.decay_rate, self.min_temp)
+
+
+    def embed_ema_update(self, flatten, embed_onehot):
+        self.cluster_size.data.mul_(self.decay).add_(
+            1 - self.decay, embed_onehot.sum(0)
+        )
+        embed_sum = flatten.transpose(0, 1) @ embed_onehot
+        self.embed_avg.data.mul_(self.decay).add_(1 - self.decay, embed_sum)
+        n = self.cluster_size.sum()
+        cluster_size = (
+            (self.cluster_size + self.eps) / (n + self.num_embeddings * self.eps) * n
+        )
+        embed_normalized = self.embed_avg / cluster_size.unsqueeze(0)
+        self.embed.data.copy_(embed_normalized)
+
+    def forward(self, x, temp=None):
+        """
+        Args:
+            temp: will use this temp instead of self.temp, for debugging
+        """
+        # Maybe decay temp
+        if temp is None:
+            self.temp_update()
+            temp = self.temp
+
+        # Calc dist
+        shape = x.shape
+        flatten = x.reshape(-1, self.dim)
+
+        embed_ind, distances = sq_l2(flatten, self.embed)
+        embed_onehot = F.one_hot(embed_ind, self.num_embeddings)
+        embed_onehot = embed_onehot.type(flatten.dtype) # cast
+
+        # Shape discrete Tensor into `x` shape
+        embed_ind = embed_ind.view(*x.shape[:-1])
+
+        # Get weights to nearest neigh: Softmax with temp
+        soft = F.softmax(distances/temp, dim=1)
+
+        # New Embedding: Softmax over neighbours
+        quantize = soft @ self.embed.t()
+        quantize = quantize.view(x.shape)
+
+        if self.embed_grad_update:
+            diff = 0
+        else:
+            # Make x closer do new embeddings
+            diff = (quantize.detach() - x).pow(2).mean()
+
+        # Non-grad Embedding update
+        if self.training and not self.embed_grad_update:
+                self.embed_ema_update(flatten, embed_onehot)
+
+        return quantize, diff, embed_ind
 
 
 class ResBlock(nn.Module):
@@ -226,6 +331,7 @@ class VQVAE(nn.Module):
         # `z_q`: same size as z_e_s but now holds the vectors from codebook
         # `diff`: MSE(embeddings in z_e_s, closest in codebooks)
         for z_e, quantize in zip(z_e_s, self.quantize):
+            # z_e, change shape form  BCHW to BHWC
             z_q, diff, argmin = quantize(z_e.permute(0, 2, 3, 1))
             avg_probs = torch.mean(z_q, dim=0)
             perplexity = torch.exp(-torch.sum(\
@@ -244,6 +350,34 @@ class VQVAE(nn.Module):
 
     def decode(self, quant):
         return self.dec(quant)
+
+class DiffVQVAE(VQVAE):
+    def __init__(self, args):
+        super().__init__(args)
+
+        embed_dim = args.embed_dim
+        num_codebooks = args.num_codebooks
+        num_embeddings = args.num_embeddings
+        diff_temp=args.nn_temp
+        decay_schedule=args.temp_decay_schedule
+        decay_rate=args.temp_decay_rate
+        embed_grad_update=args.embed_grad_update
+
+        # build the codebooks
+        self.quantize = nn.ModuleList([
+                    DiffQuantize(
+                        embed_dim // num_codebooks,
+                        num_embeddings,
+                        decay=args.decay,
+                        diff_temp=diff_temp,
+                        decay_schedule=decay_schedule,
+                        decay_rate=decay_rate,
+                        embed_grad_update=embed_grad_update)
+                    for _ in range(num_codebooks)])
+
+    @property
+    def temp(self):
+        return self.quantize[0].temp
 
 class VQVAE_2(nn.Module):
     def __init__(

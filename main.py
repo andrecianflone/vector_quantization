@@ -17,7 +17,7 @@ import data
 import utils
 import torch
 import torch.optim as optim
-from vqvae import VQVAE
+from vqvae import VQVAE, DiffVQVAE
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -104,7 +104,7 @@ def train_epoch(args, loss_func, pbar, train_loader, model, optimizer,
             av_bpd = np.mean(train_bpd[-100:])
             av_rec_err = np.mean(train_recon_error[-100:])
             av_ppl = np.mean(train_perplexity[-100:])
-            pbar.print_train(bdp=float(av_bpd), av_rec_err=float(av_rec_err),
+            pbar.print_train(bpd=float(av_bpd), temp=float(model.temp),
                                                                 increment=100)
         args.global_it += 1
 
@@ -134,7 +134,10 @@ def main(args):
     print(f"Validation set size {len(valid_loader.dataset)}")
 
     print("Loading model")
-    model = VQVAE(args).to(device) # see [2]
+    if args.model == 'diffvqvae':
+        model = DiffVQVAE(args).to(device)
+    elif args.model == 'vqvae':
+        model = VQVAE(args).to(device)
     print(f'The model has {utils.count_parameters(model):,} trainable parameters')
 
     optimizer = optim.Adam(model.parameters(),lr=args.learning_rate,
@@ -142,7 +145,7 @@ def main(args):
 
     print(f"Start training for {args.num_epochs} epochs")
     num_batches = math.ceil(len(train_loader.dataset)/train_loader.batch_size)
-    pbar = Progress(num_batches, bar_length=20, custom_increment=True)
+    pbar = Progress(num_batches, bar_length=10, custom_increment=True)
 
     # Needed for bpd
     args.KL = args.enc_height * args.enc_height * args.num_codebooks * \
@@ -190,8 +193,8 @@ if __name__ == '__main__':
     add('--batch_size', type=int, default=32)
     add('--max_iterations', type=int, default=None,
             help="Max it per epoch, for debugging (default: None)")
-    add('--num_epochs', type=int, default=20,
-            help='number of epochs (default: 20)')
+    add('--num_epochs', type=int, default=40,
+            help='number of epochs (default: 40)')
     add('--learning_rate', type=float, default=3e-4)
 
     # Quantization settings
@@ -206,7 +209,8 @@ if __name__ == '__main__':
     add('--decay', type=float, default=0.99,
             help='Moving av decay for codebook update')
 
-    # Model, defaults like in paper
+    # VAVAE model, defaults like in paper
+    add('--model', type=str, choices=['vqvae', 'diffvqvae'], default='diffvqvae')
     add('--enc_height', type=int, default=8,
             help="Encoder output size, used for downsampling and KL")
     add('--num_hiddens', type=int, default=128,
@@ -214,6 +218,16 @@ if __name__ == '__main__':
     add('--num_residual_hiddens', type=int, default = 32,
             help="Number of channels for ResNet")
     add('--num_residual_layers', type=int, default=2)
+
+    # Diff NearNeigh settings
+    add('--nn_temp', type=float, default=20.0, metavar='M',
+            help='Starting diff. nearest neighbour temp (default: 1.0)')
+    add('--temp_decay_rate', type=float, default=0.98, metavar='M',
+            help='Nearest neighbour temp decay rate (default: 0.9)')
+    add('--temp_decay_schedule', type=float, default=100, metavar='M',
+            help='How many batches before decay (default: 100)')
+    add('--embed_grad_update', action='store_true', default=False,
+            help="If True, update Embed with gradient instead of EMA")
 
     # Misc
     add('--saved_model_name', type=str, default='vqvae.pt')
