@@ -226,7 +226,7 @@ if __name__ == '__main__':
     # Diff NearNeigh settings
     add('--nn_temp', type=float, default=20.0, metavar='M',
             help='Starting diff. nearest neighbour temp (default: 1.0)')
-    add('--temp_decay_rate', type=float, default=0.98, metavar='M',
+    add('--temp_decay_rate', type=float, default=0.9, metavar='M',
             help='Nearest neighbour temp decay rate (default: 0.9)')
     add('--temp_decay_schedule', type=float, default=100, metavar='M',
             help='How many batches before decay (default: 100)')
