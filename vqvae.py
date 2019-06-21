@@ -1,8 +1,10 @@
 import utils
 """
-Vector Quantization class
+Vector Quantization
 
-Based on VQVAE code from:
+DiffVQVAE author: Andre Cianflone
+
+Original VQVAE code based on :
 https://github.com/rosinality/vq-vae-2-pytorch
 
 In turn based on

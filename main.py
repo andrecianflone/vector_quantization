@@ -13,8 +13,8 @@ References:
 import argparse
 import os
 import math
-import data
-import utils
+from utils import data, utils
+from utils.progress import Progress
 import torch
 import torch.optim as optim
 from vqvae import VQVAE, DiffVQVAE
@@ -23,11 +23,16 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter
-from progress import Progress
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def vq_vae_loss(args, x_prime, x, vq_loss, model):
+    """
+    Compute discretized recon loss, combined loss for training and bpd.
+
+    Bits per dimension (bpd) is simply nats per pixel converted to base 2.
+    -(NLL / num_pixels) / np.log(2.)
+    """
     # Use Discretized Logistic as an alternative to MSE, see [1]
     log_pxz = utils.discretized_logistic(x_prime, model.dec_log_stdv,
                                                     sample=x).mean()
@@ -35,8 +40,8 @@ def vq_vae_loss(args, x_prime, x, vq_loss, model):
     # recon_error = torch.mean((data_recon - data)**2)/args.data_variance
     # loss = recon_error + vq_loss
 
-    loss = -1 * (log_pxz / args.N) + args.commitment_cost * vq_loss
-    elbo = - (args.KL - log_pxz) / args.N
+    loss = -1 * (log_pxz / args.num_pixels) + args.commitment_cost * vq_loss
+    elbo = - (args.KL - log_pxz) / args.num_pixels
     bpd  = elbo / np.log(2.)
 
     return loss, log_pxz, bpd
@@ -154,7 +159,7 @@ def main(args):
     # Needed for bpd
     args.KL = args.enc_height * args.enc_height * args.num_codebooks * \
                                                     np.log(args.num_embeddings)
-    args.N  = np.prod(args.input_size)
+    args.num_pixels  = np.prod(args.input_size)
 
     ###############################
     # MAIN TRAIN LOOP
